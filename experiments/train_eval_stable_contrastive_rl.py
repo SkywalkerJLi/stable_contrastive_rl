@@ -1,3 +1,18 @@
+"""
+COS 435 Final Project
+
+Authors: Skywalker Li, Jack O'Donnell, Jack Deschenes
+
+
+Citations: 
+    All environments, logging, batch training, parameter search functions are taken from the original
+    Stable Contrastive RL github: (https://github.com/chongyi-zheng/stable_contrastive_rl)
+
+Our work:
+    Starting with a SAC baseline implemenation, we reimplement the stable constrastive RL training script in the paper
+    Our implementation can be found in the file:
+        stable_contrastive_rl/rlkit/torch/sac/stable_contrastive_rl_trainer.py
+"""
 import os
 import glob
 
