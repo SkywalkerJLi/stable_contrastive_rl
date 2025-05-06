@@ -154,52 +154,61 @@ class StableContrastiveRLTrainer(TorchTrainer):
 
         batch = self.augment(batch, train=train)
 
-        reward = batch['rewards']
-        terminal = batch['terminals']
-        action = batch['actions']
+        reward = batch['rewards'] 
+        terminal = batch['terminals'] 
+        action = batch['actions'] # List of actions from replay buffer batch
 
-        obs = batch['observations']
-        next_obs = batch['next_observations']
+        obs = batch['observations'] # List of observations from replay buffer batch (images) 
+        next_obs = batch['next_observations'] # List of observations from replay buffer (images) 
         goal = batch['contexts']
 
-        aug_obs = batch['augmented_observations']
-        aug_goal = batch['augmented_contexts']
+        aug_obs = batch['augmented_observations'] # Size (B, C * W * H)
+        aug_goal = batch['augmented_contexts'] # Size (B, C * W * H)
 
         batch_size = obs.shape[0]
         new_goal = goal
 
+        ### OUR IMPLEMENTATION ###
         if self.use_td:
             new_goal = next_obs
         I = torch.eye(batch_size, device=ptu.device)
+
+        # logits are the batch multiplication of the state action representation and future state representation
+        # it encodes the similarity between a state action rep and the future rep for all batches
         logits, sa_repr, g_repr, sa_repr_norm, g_repr_norm = self.qf(
             torch.cat([obs, new_goal], -1), action, repr=True)
 
         # compute classifier accuracies
-        logits_log = logits.mean(-1)
-        correct = (torch.argmax(logits_log, dim=-1) == torch.argmax(I, dim=-1))
-        logits_pos = torch.sum(logits_log * I) / torch.sum(I)
-        logits_neg = torch.sum(logits_log * (1 - I)) / torch.sum(1 - I)
-        q_pos, q_neg = torch.sum(torch.sigmoid(logits_log) * I) / torch.sum(I), \
-                       torch.sum(torch.sigmoid(logits_log) * (1 - I)) / torch.sum(1 - I)
-        q_pos_ratio, q_neg_ratio = q_pos / (1 - q_pos), q_neg / (1 - q_neg)
-        binary_accuracy = torch.mean(((logits_log > 0) == I).float())
-        categorical_accuracy = torch.mean(correct.float())
+        # logits_log = logits.mean(-1)
+        # correct = (torch.argmax(logits_log, dim=-1) == torch.argmax(I, dim=-1))
+        # logits_pos = torch.sum(logits_log * I) / torch.sum(I)
+        # logits_neg = torch.sum(logits_log * (1 - I)) / torch.sum(1 - I)
+        # q_pos, q_neg = torch.sum(torch.sigmoid(logits_log) * I) / torch.sum(I), torch.sum(torch.sigmoid(logits_log) * (1 - I)) / torch.sum(1 - I)
+        # q_pos_ratio, q_neg_ratio = q_pos / (1 - q_pos), q_neg / (1 - q_neg)
+        # binary_accuracy = torch.mean(((logits_log > 0) == I).float())
+        # categorical_accuracy = torch.mean(correct.float())
 
         if self.use_td:
             # Make sure to use the twin Q trick.
             assert len(logits.shape) == 3
 
             # we evaluate the next-state Q function using random goals
+
+            # shifts indicies one to the left to find next state targets
             goal_indices = torch.roll(
                 torch.arange(batch_size, dtype=torch.int64), -1)
 
             random_goal = new_goal[goal_indices]
 
+            # Appending the next observation with a random goal 
             next_s_rand_g = torch.cat([next_obs, random_goal], -1)
 
+            # Given the next state and random goal, output distribution of action 
             next_dist = self.policy(next_s_rand_g)
+            # Sample action
             next_action = next_dist.rsample()
 
+            # Target Q network to get the likelihood of reaching the future state, given the next state and next action
             next_q = self.target_qf(
                 next_s_rand_g, next_action)
 
@@ -211,18 +220,35 @@ class StableContrastiveRLTrainer(TorchTrainer):
             w = torch.clamp(w, min=0.0, max=w_clipping)
 
             # (B, B, 2) --> (B, 2), computes diagonal of each twin Q.
-            pos_logits = torch.diagonal(logits).permute(1, 0)
+            pos_logits = torch.diagonal(logits).permute(1, 0) # permuting creates two rows where each row contains the diagonal entries of a Q function
+
+            # want the pos_logits to be as close to 1 as possible
             loss_pos = self.qf_criterion(
                 pos_logits, ptu.ones_like(pos_logits))
-
+            
+            # selects from 0 to B - 1 a specific row from logits, say row i
+            # then selects column i+1 due to goal_indicies being the roll of torch.arange(batch_size)
+            # so final shape is (B, 2) but each element is a mismatched dot product between the state action and future(goal) state
+            # selects a state and action representation from one observation and the future state from another observation
             neg_logits = logits[torch.arange(batch_size), goal_indices]
+
+            # given the next state and action from the current state and action, 
+            # if the random future state is very likely to occur from the next state and action, 
+            # then we want the neg logits to be close to 1
             loss_neg1 = w[:, None] * self.qf_criterion(
                 neg_logits, ptu.ones_like(neg_logits))
+            
+            # want the neg logits which come from the random future states to be close to 0
             loss_neg2 = self.qf_criterion(
                 neg_logits, ptu.zeros_like(neg_logits))
 
-            qf_loss = (1 - self.discount) * loss_pos + \
-                      self.discount * loss_neg1 + loss_neg2
+
+            # loss_pos is log σ(f (s, a, s′))
+            # loss_neg1 is ⌊w(s′, a′, sf )⌋sg log σ(f (s, a, sf ))
+            # loss_neg2 is log(1 − σ(f (s, a, sf )))
+            qf_loss = (1 - self.discount) * loss_pos + self.discount * loss_neg1 + loss_neg2
+            
+            # Average loss over batch
             qf_loss = torch.mean(qf_loss)
         else:  # For the MC losses.
             w = ptu.zeros(1)
@@ -378,18 +404,18 @@ class StableContrastiveRLTrainer(TorchTrainer):
                 self.eval_statistics[prefix + 'qf/repr_log_scale'] = np.mean(
                     ptu.get_numpy(self.qf.repr_log_scale))
 
-            self.eval_statistics[prefix + 'qf/logits_pos'] = np.mean(
-                ptu.get_numpy(logits_pos))
-            self.eval_statistics[prefix + 'qf/logits_neg'] = np.mean(
-                ptu.get_numpy(logits_neg))
-            self.eval_statistics[prefix + 'qf/q_pos_ratio'] = np.mean(
-                ptu.get_numpy(q_pos_ratio))
-            self.eval_statistics[prefix + 'qf/q_neg_ratio'] = np.mean(
-                ptu.get_numpy(q_neg_ratio))
-            self.eval_statistics[prefix + 'qf/binary_accuracy'] = np.mean(
-                ptu.get_numpy(binary_accuracy))
-            self.eval_statistics[prefix + 'qf/categorical_accuracy'] = np.mean(
-                ptu.get_numpy(categorical_accuracy))
+            # self.eval_statistics[prefix + 'qf/logits_pos'] = np.mean(
+            #     ptu.get_numpy(logits_pos))
+            # self.eval_statistics[prefix + 'qf/logits_neg'] = np.mean(
+            #     ptu.get_numpy(logits_neg))
+            # self.eval_statistics[prefix + 'qf/q_pos_ratio'] = np.mean(
+            #     ptu.get_numpy(q_pos_ratio))
+            # self.eval_statistics[prefix + 'qf/q_neg_ratio'] = np.mean(
+            #     ptu.get_numpy(q_neg_ratio))
+            # self.eval_statistics[prefix + 'qf/binary_accuracy'] = np.mean(
+            #     ptu.get_numpy(binary_accuracy))
+            # self.eval_statistics[prefix + 'qf/categorical_accuracy'] = np.mean(
+            #     ptu.get_numpy(categorical_accuracy))
 
             self.eval_statistics.update(create_stats_ordered_dict(
                 prefix + 'logits',

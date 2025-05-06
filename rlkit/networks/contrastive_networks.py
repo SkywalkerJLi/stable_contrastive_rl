@@ -60,19 +60,19 @@ class ContrastiveQf(nn.Module):
         self._sa_encoder = Mlp(
             hidden_sizes, representation_dim, state_dim + self._action_dim,
             **kwargs,
-        )
+        ) # output is size 16
         self._g_encoder = Mlp(
             hidden_sizes, representation_dim, state_dim,
             **kwargs,
-        )
+        ) # output is size 16
         self._sa_encoder2 = Mlp(
             hidden_sizes, representation_dim, state_dim + self._action_dim,
             **kwargs,
-        )
+        ) # output is size 16
         self._g_encoder2 = Mlp(
             hidden_sizes, representation_dim, state_dim,
             **kwargs,
-        )
+        ) # output is size 16
 
         if self._repr_norm_temp:
             if repr_log_scale is None:
@@ -97,8 +97,8 @@ class ContrastiveQf(nn.Module):
         if hidden is None:
             if self._use_image_obs:
                 imlen = self._imsize * self._imsize * 3
-                state = self._img_encoder(obs[:, :imlen]).flatten(1)
-                goal = self._img_encoder(obs[:, imlen:]).flatten(1)
+                state = self._img_encoder(obs[:, :imlen]).flatten(1) # passes the first image in the observation into the CNN which outputs a state representation 
+                goal = self._img_encoder(obs[:, imlen:]).flatten(1) # passes the second image in the observation into the CNN which outputs a goal representation
             else:
                 state = obs[:, :self._obs_dim]
                 goal = obs[:, self._obs_dim:]
@@ -106,8 +106,8 @@ class ContrastiveQf(nn.Module):
             state, goal = hidden
 
         if hidden is None:
-            sa_repr = self._sa_encoder(torch.cat([state, action], dim=-1))
-            g_repr = self._g_encoder(goal)
+            sa_repr = self._sa_encoder(torch.cat([state, action], dim=-1)) # concats the state rep with the action rep to get a sa rep
+            g_repr = self._g_encoder(goal) # converts the goal representation into a size 16 representation
         else:
             sa_repr = self._sa_encoder2(torch.cat([state, action], dim=-1))
             g_repr = self._g_encoder2(goal)
@@ -124,7 +124,10 @@ class ContrastiveQf(nn.Module):
     def forward(self, obs, action, repr=False):
         sa_repr, g_repr, hidden = self._compute_representation(
             obs, action)
-        outer = torch.bmm(sa_repr.unsqueeze(0), g_repr.permute(1, 0).unsqueeze(0))[0]
+        # computes the similarity metric between different state action and goal representations within a batch
+        # iterates over all state action reps and goal reps. The diagonal represents the state action rep and goal rep from 
+        # THE SAME OBSERVATION --> so this ideally should be high (close to 1)
+        outer = torch.bmm(sa_repr.unsqueeze(0), g_repr.permute(1, 0).unsqueeze(0))[0] 
 
         if self._twin_q:
             sa_repr2, g_repr2, _ = self._compute_representation(
