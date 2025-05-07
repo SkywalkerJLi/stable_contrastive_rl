@@ -191,6 +191,7 @@ class StableContrastiveRLTrainer(TorchTrainer):
 
         # Given the next state and random future state, output distribution of actions
         next_dist = self.policy(next_observation_random_future_state)
+
         # Sample action
         next_action = next_dist.rsample()
 
@@ -205,6 +206,7 @@ class StableContrastiveRLTrainer(TorchTrainer):
         # get the similiarity measure between the state action and its corresponding future state
         next_v = torch.diag(next_logits)
         
+        # Calculating the W value as in the paper
         w = next_v / (1 - next_v)
         w_clipping = 20.0
         w = torch.clamp(w, min=0.0, max=w_clipping)
@@ -245,80 +247,79 @@ class StableContrastiveRLTrainer(TorchTrainer):
         """
         Policy and Alpha Loss
         """
-        
+
+        # Goal conditioned policy
         obs_goal = torch.cat([obs, goal], -1)
         aug_obs_goal = torch.cat([aug_obs, aug_goal], -1)
+
         dist = self.policy(obs_goal)
         dist_aug = self.policy(aug_obs_goal)
+
+        # Get sampled action and log probs
         sampled_action, log_prob = dist.rsample_and_logprob()
 
-        if self.adaptive_entropy_coefficient:
-            alpha_loss = -(self.log_alpha.exp() * (
-                log_prob + self.target_entropy).detach()).mean()
-            alpha = self.log_alpha.exp()
-        else:
-            alpha_loss = 0
-            alpha = self.entropy_coefficient
+        alpha = self.entropy_coefficient
 
         q_action = self.qf(obs_goal, sampled_action)
 
         if len(q_action.shape) == 3:  # twin q trick
             assert q_action.shape[2] == 2
-            q_action = torch.min(q_action, dim=-1)[0]
+            q_action = torch.min(q_action, dim = -1)[0]
 
         actor_q_loss = alpha * log_prob - torch.diag(q_action)
 
-        assert 0.0 <= self.bc_coef <= 1.0
-        orig_action = action
+        # assert 0.0 <= self.bc_coef <= 1.0
+        # orig_action = action
 
-        train_mask = ((orig_action * 1E8 % 10)[:, 0] != 4).float()
+        # train_mask = ((orig_action * 1E8 % 10)[:, 0] != 4).float()
 
-        gcbc_loss = -train_mask * dist.log_prob(orig_action)
-        gcbc_val_loss = -(1.0 - train_mask) * dist.log_prob(orig_action)
-        aug_gcbc_loss = -train_mask * dist_aug.log_prob(orig_action)
-        aug_gcbc_val_loss = -(1.0 - train_mask) * dist_aug.log_prob(orig_action)
+        # gcbc_loss = -train_mask * dist.log_prob(orig_action)
+        # gcbc_val_loss = -(1.0 - train_mask) * dist.log_prob(orig_action)
+        # aug_gcbc_loss = -train_mask * dist_aug.log_prob(orig_action)
+        # aug_gcbc_val_loss = -(1.0 - train_mask) * dist_aug.log_prob(orig_action)
 
-        actor_loss = self.bc_coef * aug_gcbc_loss + (1 - self.bc_coef) * actor_q_loss
+        # actor_loss = self.bc_coef * aug_gcbc_loss + (1 - self.bc_coef) * actor_q_loss
 
-        gcbc_loss_log = torch.sum(gcbc_loss) / torch.sum(train_mask)
-        aug_gcbc_loss_log = torch.sum(aug_gcbc_loss) / torch.sum(train_mask)
-        if torch.sum(1 - train_mask) > 0:
-            gcbc_val_loss_log = torch.sum(gcbc_val_loss) / torch.sum(1 - train_mask)
-            aug_gcbc_val_loss_log = torch.sum(aug_gcbc_val_loss) / torch.sum(1 - train_mask)
-        else:
-            gcbc_val_loss_log = ptu.zeros(1)
-            aug_gcbc_val_loss_log = ptu.zeros(1)
+        # gcbc_loss_log = torch.sum(gcbc_loss) / torch.sum(train_mask)
+        # aug_gcbc_loss_log = torch.sum(aug_gcbc_loss) / torch.sum(train_mask)
 
-        actor_loss = torch.mean(actor_loss)
+        # if torch.sum(1 - train_mask) > 0:
+        #     gcbc_val_loss_log = torch.sum(gcbc_val_loss) / torch.sum(1 - train_mask)
+        #     aug_gcbc_val_loss_log = torch.sum(aug_gcbc_val_loss) / torch.sum(1 - train_mask)
+        # else:
+        #     gcbc_val_loss_log = ptu.zeros(1)
+        #     aug_gcbc_val_loss_log = ptu.zeros(1)
+
+        actor_loss = torch.mean(actor_q_loss)
 
         if train:
             """
             Optimization.
             """
             if self.n_train_steps_total % self.update_period == 0:
-                if self.adaptive_entropy_coefficient:
-                    self.alpha_optimizer.zero_grad()
-                    alpha_loss.backward()
-                    if (self.gradient_clipping is not None and
-                            self.gradient_clipping > 0):
-                        torch.nn.utils.clip_grad_norm(
-                            [self.log_alpha], self.gradient_clipping)
-                    self.alpha_optimizer.step()
+                # if self.adaptive_entropy_coefficient:
+                #     self.alpha_optimizer.zero_grad()
+                #     alpha_loss.backward()
+                #     if (self.gradient_clipping is not None and
+                #             self.gradient_clipping > 0):
+                #         torch.nn.utils.clip_grad_norm(
+                #             [self.log_alpha], self.gradient_clipping)
+                #     self.alpha_optimizer.step()
 
                 self.policy_optimizer.zero_grad()
                 actor_loss.backward()
-                if (self.gradient_clipping is not None and
-                        self.gradient_clipping > 0):
-                    torch.nn.utils.clip_grad_norm(
-                        self.policy.parameters(), self.gradient_clipping)
+                # if (self.gradient_clipping is not None and
+                #         self.gradient_clipping > 0):
+                #     torch.nn.utils.clip_grad_norm(
+                #         self.policy.parameters(), self.gradient_clipping)
                 self.policy_optimizer.step()
 
                 self.qf_optimizer.zero_grad()
                 qf_loss.backward()
-                if (self.gradient_clipping is not None and
-                        self.gradient_clipping > 0):
-                    torch.nn.utils.clip_grad_norm(
-                        self.qf.parameters(), self.gradient_clipping)
+                # if (self.gradient_clipping is not None and
+                #         self.gradient_clipping > 0):
+                #     torch.nn.utils.clip_grad_norm(
+                #         self.qf.parameters(), self.gradient_clipping)
                 self.qf_optimizer.step()
 
             """
@@ -348,14 +349,14 @@ class StableContrastiveRLTrainer(TorchTrainer):
                 ptu.get_numpy(actor_loss))
             self.eval_statistics[prefix + 'Policy Loss/Actor Q Loss'] = np.mean(
                 ptu.get_numpy(actor_q_loss))
-            self.eval_statistics[prefix + 'Policy Loss/GCBC Loss'] = np.mean(
-                ptu.get_numpy(gcbc_loss_log))
-            self.eval_statistics[prefix + 'Policy Loss/GCBC Val Loss'] = np.mean(
-                ptu.get_numpy(gcbc_val_loss_log))
-            self.eval_statistics[prefix + 'Policy Loss/Augmented GCBC Loss'] = np.mean(
-                ptu.get_numpy(aug_gcbc_loss_log))
-            self.eval_statistics[prefix + 'Policy Loss/Augmented GCBC Val Loss'] = np.mean(
-                ptu.get_numpy(aug_gcbc_val_loss_log))
+            # self.eval_statistics[prefix + 'Policy Loss/GCBC Loss'] = np.mean(
+            #     ptu.get_numpy(gcbc_loss_log))
+            # self.eval_statistics[prefix + 'Policy Loss/GCBC Val Loss'] = np.mean(
+            #     ptu.get_numpy(gcbc_val_loss_log))
+            # self.eval_statistics[prefix + 'Policy Loss/Augmented GCBC Loss'] = np.mean(
+            #     ptu.get_numpy(aug_gcbc_loss_log))
+            # self.eval_statistics[prefix + 'Policy Loss/Augmented GCBC Val Loss'] = np.mean(
+            #     ptu.get_numpy(aug_gcbc_val_loss_log))
 
             self.eval_statistics.update(create_stats_ordered_dict(
                 prefix + 'Policy Mean',
@@ -406,22 +407,24 @@ class StableContrastiveRLTrainer(TorchTrainer):
                 prefix + 'reward',
                 ptu.get_numpy(reward),
             ))
+            
             self.eval_statistics.update(create_stats_ordered_dict(
                 prefix + 'terminal',
                 ptu.get_numpy(terminal),
             ))
+
             actor_statistics = add_prefix(
                 dist.get_diagnostics(), prefix + 'policy/')
             self.eval_statistics.update(actor_statistics)
 
-            if self.entropy_coefficient is not None:
-                self.eval_statistics[prefix + 'alpha'] = alpha
-            else:
-                self.eval_statistics[prefix + 'alpha'] = np.mean(
-                    ptu.get_numpy(alpha))
-            if self.adaptive_entropy_coefficient:
-                self.eval_statistics[prefix + 'Alpha Loss'] = np.mean(
-                    ptu.get_numpy(alpha_loss))
+            # if self.entropy_coefficient is not None:
+            self.eval_statistics[prefix + 'alpha'] = alpha
+            # else:
+            #     self.eval_statistics[prefix + 'alpha'] = np.mean(
+            #         ptu.get_numpy(alpha))
+            # if self.adaptive_entropy_coefficient:
+            #     self.eval_statistics[prefix + 'Alpha Loss'] = np.mean(
+            #         ptu.get_numpy(alpha_loss))
 
         if train:
             self.n_train_steps_total += 1
