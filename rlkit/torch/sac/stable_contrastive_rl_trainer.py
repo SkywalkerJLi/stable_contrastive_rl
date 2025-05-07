@@ -166,110 +166,86 @@ class StableContrastiveRLTrainer(TorchTrainer):
         aug_goal = batch['augmented_contexts'] # Size (B, C * W * H)
 
         batch_size = obs.shape[0]
-        new_goal = goal
 
         ### OUR IMPLEMENTATION ###
-        if self.use_td:
-            new_goal = next_obs
-        I = torch.eye(batch_size, device=ptu.device)
+
+        # Use the next state as the goal state
+        new_goal = next_obs
 
         # logits are the batch multiplication of the state action representation and future state representation
         # it encodes the similarity between a state action rep and the future rep for all batches
-        logits, sa_repr, g_repr, sa_repr_norm, g_repr_norm = self.qf(
-            torch.cat([obs, new_goal], -1), action, repr=True)
+        logits = self.qf(torch.cat([obs, new_goal], -1), action)
 
-        # compute classifier accuracies
-        # logits_log = logits.mean(-1)
-        # correct = (torch.argmax(logits_log, dim=-1) == torch.argmax(I, dim=-1))
-        # logits_pos = torch.sum(logits_log * I) / torch.sum(I)
-        # logits_neg = torch.sum(logits_log * (1 - I)) / torch.sum(1 - I)
-        # q_pos, q_neg = torch.sum(torch.sigmoid(logits_log) * I) / torch.sum(I), torch.sum(torch.sigmoid(logits_log) * (1 - I)) / torch.sum(1 - I)
-        # q_pos_ratio, q_neg_ratio = q_pos / (1 - q_pos), q_neg / (1 - q_neg)
-        # binary_accuracy = torch.mean(((logits_log > 0) == I).float())
-        # categorical_accuracy = torch.mean(correct.float())
+        # Make sure to use the twin Q trick.
+        assert len(logits.shape) == 3
 
-        if self.use_td:
-            # Make sure to use the twin Q trick.
-            assert len(logits.shape) == 3
+        # we evaluate the next-state Q function using random goals
+        # shifts indicies one to the left to find next state targets
+        random_state_indices = torch.roll(torch.arange(batch_size, dtype=torch.int64), -1)
 
-            # we evaluate the next-state Q function using random goals
+        # Each future state is shuffled 
+        random_future_state = new_goal[random_state_indices]
 
-            # shifts indicies one to the left to find next state targets
-            goal_indices = torch.roll(
-                torch.arange(batch_size, dtype=torch.int64), -1)
+        # Append the next observation image with a different future state image 
+        next_observation_random_future_state = torch.cat([next_obs, random_future_state], -1)
 
-            random_goal = new_goal[goal_indices]
+        # Given the next state and random future state, output distribution of actions
+        next_dist = self.policy(next_observation_random_future_state)
+        # Sample action
+        next_action = next_dist.rsample()
 
-            # Appending the next observation with a random goal 
-            next_s_rand_g = torch.cat([next_obs, random_goal], -1)
+        # Target Q network to get the likelihood of reaching the random future state, given the next state and next action
+        next_logits = self.target_qf(next_observation_random_future_state, next_action)
 
-            # Given the next state and random goal, output distribution of action 
-            next_dist = self.policy(next_s_rand_g)
-            # Sample action
-            next_action = next_dist.rsample()
+        next_logits = torch.sigmoid(next_logits)
 
-            # Target Q network to get the likelihood of reaching the future state, given the next state and next action
-            next_q = self.target_qf(
-                next_s_rand_g, next_action)
+        # take the minimum of the two target Q functions
+        next_logits = torch.min(next_logits, dim=-1)[0].detach()
 
-            next_q = torch.sigmoid(next_q)
-            next_v = torch.min(next_q, dim=-1)[0].detach()
-            next_v = torch.diag(next_v)
-            w = next_v / (1 - next_v)
-            w_clipping = 20.0
-            w = torch.clamp(w, min=0.0, max=w_clipping)
+        # get the similiarity measure between the state action and its corresponding future state
+        next_v = torch.diag(next_logits)
+        
+        w = next_v / (1 - next_v)
+        w_clipping = 20.0
+        w = torch.clamp(w, min=0.0, max=w_clipping)
 
-            # (B, B, 2) --> (B, 2), computes diagonal of each twin Q.
-            pos_logits = torch.diagonal(logits).permute(1, 0) # permuting creates two rows where each row contains the diagonal entries of a Q function
+        # (B, B, 2) --> (B, 2), computes diagonal of each twin Q.
+        # The diagonal entries of the logits represent the similiarity measure between a state action and its corresponding future state
+        pos_logits = torch.diagonal(logits).permute(1, 0) # permuting creates two rows where each row contains the diagonal entries of a Q function
 
-            # want the pos_logits to be as close to 1 as possible
-            loss_pos = self.qf_criterion(
-                pos_logits, ptu.ones_like(pos_logits))
-            
-            # selects from 0 to B - 1 a specific row from logits, say row i
-            # then selects column i+1 due to goal_indicies being the roll of torch.arange(batch_size)
-            # so final shape is (B, 2) but each element is a mismatched dot product between the state action and future(goal) state
-            # selects a state and action representation from one observation and the future state from another observation
-            neg_logits = logits[torch.arange(batch_size), goal_indices]
+        # want the pos_logits to be as close to 1 as possible
+        loss_pos = self.qf_criterion(
+            pos_logits, ptu.ones_like(pos_logits))
+        
+        # selects from 0 to B - 1 a specific row from logits, say row i
+        # then selects column i+1 due to goal_indicies being the roll of torch.arange(batch_size)
+        # so final shape is (B, 2) but each element is a mismatched dot product between the state action and future(goal) state
+        # selects a state and action representation from one observation and the future state from another observation
+        neg_logits = logits[torch.arange(batch_size), random_state_indices]
 
-            # given the next state and action from the current state and action, 
-            # if the random future state is very likely to occur from the next state and action, 
-            # then we want the neg logits to be close to 1
-            loss_neg1 = w[:, None] * self.qf_criterion(
-                neg_logits, ptu.ones_like(neg_logits))
-            
-            # want the neg logits which come from the random future states to be close to 0
-            loss_neg2 = self.qf_criterion(
-                neg_logits, ptu.zeros_like(neg_logits))
+        # given the next state and action from the current state and action, 
+        # if the random future state is very likely to occur from the next state and action, 
+        # then we want the neg logits to be close to 1
+        loss_neg1 = w[:, None] * self.qf_criterion(
+            neg_logits, ptu.ones_like(neg_logits))
+        
+        # want the neg logits which come from the random future states to be close to 0
+        loss_neg2 = self.qf_criterion(
+            neg_logits, ptu.zeros_like(neg_logits))
 
 
-            # loss_pos is log σ(f (s, a, s′))
-            # loss_neg1 is ⌊w(s′, a′, sf )⌋sg log σ(f (s, a, sf ))
-            # loss_neg2 is log(1 − σ(f (s, a, sf )))
-            qf_loss = (1 - self.discount) * loss_pos + self.discount * loss_neg1 + loss_neg2
-            
-            # Average loss over batch
-            qf_loss = torch.mean(qf_loss)
-        else:  # For the MC losses.
-            w = ptu.zeros(1)
-
-            # decrease the weight of negative term to 1 / (B - 1)
-            qf_loss_weights = ptu.ones((batch_size, batch_size)) / (batch_size - 1)
-            qf_loss_weights[torch.arange(batch_size), torch.arange(batch_size)] = 1
-            if len(logits.shape) == 3:
-                # logits.shape = (B, B, 2) with 1 term for positive pair
-                # and (B - 1) terms for negative pairs in each row
-                qf_loss = self.qf_criterion(
-                    logits, I.unsqueeze(-1).repeat(1, 1, 2)).mean(-1)
-            else:
-                qf_loss = self.qf_criterion(logits, I)
-            qf_loss *= qf_loss_weights
-
-            qf_loss = torch.mean(qf_loss)
+        # loss_pos is log σ(f (s, a, s′))
+        # loss_neg1 is ⌊w(s′, a′, sf )⌋sg log σ(f (s, a, sf ))
+        # loss_neg2 is log(1 − σ(f (s, a, sf )))
+        qf_loss = (1 - self.discount) * loss_pos + self.discount * loss_neg1 + loss_neg2
+        
+        # Average loss over batch
+        qf_loss = torch.mean(qf_loss)
 
         """
         Policy and Alpha Loss
         """
+        
         obs_goal = torch.cat([obs, goal], -1)
         aug_obs_goal = torch.cat([aug_obs, aug_goal], -1)
         dist = self.policy(obs_goal)
@@ -390,19 +366,19 @@ class StableContrastiveRLTrainer(TorchTrainer):
                 ptu.get_numpy(dist.stddev),
             ))
 
-            # critic statistics
-            self.eval_statistics.update(create_stats_ordered_dict(
-                prefix + 'qf/sa_repr_norm',
-                ptu.get_numpy(sa_repr_norm),
-            ))
-            self.eval_statistics.update(create_stats_ordered_dict(
-                prefix + 'qf/g_repr_norm',
-                ptu.get_numpy(g_repr_norm),
-            ))
+            # # critic statistics
+            # self.eval_statistics.update(create_stats_ordered_dict(
+            #     prefix + 'qf/sa_repr_norm',
+            #     ptu.get_numpy(sa_repr_norm),
+            # ))
+            # self.eval_statistics.update(create_stats_ordered_dict(
+            #     prefix + 'qf/g_repr_norm',
+            #     ptu.get_numpy(g_repr_norm),
+            # ))
 
-            if self.qf.repr_norm:
-                self.eval_statistics[prefix + 'qf/repr_log_scale'] = np.mean(
-                    ptu.get_numpy(self.qf.repr_log_scale))
+            # if self.qf.repr_norm:
+            #     self.eval_statistics[prefix + 'qf/repr_log_scale'] = np.mean(
+            #         ptu.get_numpy(self.qf.repr_log_scale))
 
             # self.eval_statistics[prefix + 'qf/logits_pos'] = np.mean(
             #     ptu.get_numpy(logits_pos))
