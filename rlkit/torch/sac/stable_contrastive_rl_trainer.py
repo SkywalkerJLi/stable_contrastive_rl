@@ -172,6 +172,9 @@ class StableContrastiveRLTrainer(TorchTrainer):
 
         ### OUR IMPLEMENTATION ###
 
+        """
+        Critic Loss
+        """
         # Use the next state as the goal state
         new_goal = next_obs
 
@@ -270,9 +273,8 @@ class StableContrastiveRLTrainer(TorchTrainer):
         print("qf_loss 2 shape: ", qf_loss.shape)
 
         """
-        Policy and Alpha Loss
+        Actor Loss
         """
-
         # Goal conditioned policy
         obs_goal = torch.cat([obs, goal], -1)
 
@@ -285,19 +287,19 @@ class StableContrastiveRLTrainer(TorchTrainer):
         # Get sampled action and log probs
         sampled_action, log_prob = dist.rsample_and_logprob()
 
-        alpha = self.entropy_coefficient
-
         q_action = self.qf(obs_goal, sampled_action)
         q_action = torch.min(q_action, dim = -1)[0]
 
         orig_action = action
 
+        # First term in their policy objective
+        alpha = self.entropy_coefficient
         actor_q_loss = alpha * log_prob - torch.diag(q_action)
 
         # Taken from their implementation
         train_mask = ((orig_action * 1E8 % 10)[:, 0] != 4).float()
 
-
+        # Second term in their policy objective
         actor_aug_log_loss =  - train_mask * dist_aug.log_prob(orig_action)
 
         actor_loss = (1 - self.bc_coef) * actor_q_loss + self.bc_coef * actor_aug_log_loss
@@ -309,31 +311,16 @@ class StableContrastiveRLTrainer(TorchTrainer):
             Optimization.
             """
             if self.n_train_steps_total % self.update_period == 0:
-                # if self.adaptive_entropy_coefficient:
-                #     self.alpha_optimizer.zero_grad()
-                #     alpha_loss.backward()
-                #     if (self.gradient_clipping is not None and
-                #             self.gradient_clipping > 0):
-                #         torch.nn.utils.clip_grad_norm(
-                #             [self.log_alpha], self.gradient_clipping)
-                #     self.alpha_optimizer.step()
-
                 self.policy_optimizer.zero_grad()
                 actor_loss.backward()
-                # if (self.gradient_clipping is not None and
-                #         self.gradient_clipping > 0):
-                #     torch.nn.utils.clip_grad_norm(
-                #         self.policy.parameters(), self.gradient_clipping)
+
                 self.policy_optimizer.step()
 
                 self.qf_optimizer.zero_grad()
                 qf_loss.backward()
-                # if (self.gradient_clipping is not None and
-                #         self.gradient_clipping > 0):
-                #     torch.nn.utils.clip_grad_norm(
-                #         self.qf.parameters(), self.gradient_clipping)
-                self.qf_optimizer.step()
 
+                self.qf_optimizer.step()
+        ### END OUR IMPLEMENTATION ####
             """
             Soft Updates
             """
