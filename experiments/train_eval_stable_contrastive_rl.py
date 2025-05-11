@@ -10,8 +10,9 @@ Citations:
 
 Our work:
     Starting with a SAC baseline implemenation, we reimplement the stable constrastive RL training script in the paper
-    Our implementation can be found in the file:
+    Our implementations can be found in the file:
         stable_contrastive_rl/rlkit/torch/sac/stable_contrastive_rl_trainer.py
+        stable_contrastive_rl/rlkit/networks/contrastive_networks.py
 """
 
 import os
